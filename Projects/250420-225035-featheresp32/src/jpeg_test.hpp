@@ -1,3 +1,5 @@
+const uint16_t testImageJpegBytes_len = 4036; // Length of the test image data
+
 // Automatically generated Base64 encoded JPEG data
 const uint8_t testImageJpegBase64[] =
     "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYa"

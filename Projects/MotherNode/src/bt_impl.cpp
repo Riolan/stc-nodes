@@ -195,42 +195,68 @@ namespace bt {
 
             } else if (cmd.rfind("REQUEST_IMAGE", 0) == 0) { // Check prefix
                  Serial.println("Processing REQUEST_IMAGE...");
-                 // Format expected: REQUEST_IMAGE;nodeId
+                 // Format expected: REQUEST_IMAGE;nodeId;eventUUID
                  size_t firstSemi = cmd.find(';');
-                 if (firstSemi != std::string::npos && firstSemi < cmd.length() - 1) {
-                     
-                         int nodeIdInt = std::stoi(cmd.substr(firstSemi + 1));
-                         if (nodeIdInt < 0 || nodeIdInt > 255) throw std::out_of_range("Node ID out of range 0-255");
-                         uint8_t nodeId = static_cast<uint8_t>(nodeIdInt);
-                         try {
-                            // ... (parse nodeId) ...
-                            Serial.print("  Setting flag for LoRa image request for Node 0x"); /* ... */
-       
-                            // --- Set Flag and Params ---
-                            // taskENTER_CRITICAL(&loraRequestMutex); // Optional lock
-                            if (lora_request_pending) {
-                               Serial.println("WARN: Overwriting previous pending LoRa request!");
-                               queueStringToBLEAndChunk("Error: Previous LoRa command still pending\n");
-                            }
-                            lora_req_targetNodeID = nodeId;
-                            lora_req_type = lora::PACKET_TYPE_COMMAND;
-                            lora_req_subtype = lora::SUBTYPE_REQUEST_IMAGE;
-                            lora_req_payload_len = 0; // No payload for this command
-                            lora_req_requireAck = true; // Or false? Depends if edge node ACKs the command itself
-                            lora_request_pending = true; // Set flag LAST
-                            // taskEXIT_CRITICAL(&loraRequestMutex); // Optional unlock
-                            // --- End Set Flag ---
-       
-                            queueStringToBLEAndChunk("OK: REQUEST_IMAGE command flagged for LoRa\n");
-       
-                        } catch (...) { /* ... error handling ... */ }
-                         
-                 } else {
-                      Serial.println("Error: Invalid REQUEST_IMAGE format (missing ';nodeId').");
-                      queueStringToBLEAndChunk("Error: Invalid REQUEST_IMAGE format (missing ';nodeId')\n");
-                 }
+                 size_t secondSemi = (firstSemi != std::string::npos) ? cmd.find(';', firstSemi + 1) : std::string::npos; // Find second semicolon
 
-            } else {
+                 // Check if both semicolons were found and there's data after the second one
+                 if (firstSemi != std::string::npos && secondSemi != std::string::npos && secondSemi < cmd.length() - 1) {
+                      try {
+                          // --- Parse Node ID ---
+                          std::string nodeIdStr = cmd.substr(firstSemi + 1, secondSemi - firstSemi - 1);
+                          int nodeIdInt = std::stoi(nodeIdStr);
+                          if (nodeIdInt < 0 || nodeIdInt > 255) throw std::out_of_range("Node ID out of range 0-255");
+                          uint8_t nodeId = static_cast<uint8_t>(nodeIdInt);
+
+                          // --- Parse Event UUID ---
+                          std::string eventUUIDStr = cmd.substr(secondSemi + 1);
+                          // Use stoul for unsigned long (uint32_t fits within unsigned long)
+                          unsigned long eventUUID_ul = std::stoul(eventUUIDStr);
+                          // Optional: Check if it fits uint32_t if necessary, though stoul might throw out_of_range
+                          if (eventUUID_ul > UINT32_MAX) throw std::out_of_range("Event UUID out of range for uint32_t");
+                          uint32_t eventUUID = static_cast<uint32_t>(eventUUID_ul);
+
+                          Serial.print("  Setting flag for LoRa image request - Node: 0x"); Serial.print(nodeId, HEX);
+                          Serial.print(", EventUUID: 0x"); Serial.println(eventUUID, HEX);
+
+                          // --- Set Flag and Params ---
+                          // taskENTER_CRITICAL(&loraRequestMutex); // Optional lock
+                          if (lora_request_pending) {
+                             Serial.println("WARN: Overwriting previous pending LoRa request!");
+                             queueStringToBLEAndChunk("Error: Previous LoRa command still pending\n");
+                          }
+                          lora_req_targetNodeID = nodeId;
+                          lora_req_type = lora::PACKET_TYPE_COMMAND;
+                          lora_req_subtype = lora::SUBTYPE_REQUEST_IMAGE;
+
+                          // *** Pack UUID into payload ***
+                          lora_req_payload[0] = (eventUUID >> 24) & 0xFF;
+                          lora_req_payload[1] = (eventUUID >> 16) & 0xFF;
+                          lora_req_payload[2] = (eventUUID >> 8) & 0xFF;
+                          lora_req_payload[3] = eventUUID & 0xFF;
+                          lora_req_payload_len = sizeof(uint32_t); // Set length to 4 bytes
+                          // *** End Pack UUID ***
+
+                          lora_req_requireAck = true; // Command itself requires ACK
+                          lora_request_pending = true; // Set flag LAST
+                          // taskEXIT_CRITICAL(&loraRequestMutex); // Optional unlock
+                          // --- End Set Flag ---
+
+                          queueStringToBLEAndChunk("OK: REQUEST_IMAGE command flagged for LoRa\n");
+
+                      } catch (const std::invalid_argument& ia) {
+                          Serial.print("Error parsing REQUEST_IMAGE IDs: "); Serial.println(ia.what());
+                          queueStringToBLEAndChunk("Error: Invalid number format in REQUEST_IMAGE command\n");
+                      } catch (const std::out_of_range& oor) {
+                          Serial.print("Error parsing REQUEST_IMAGE IDs out of range: "); Serial.println(oor.what());
+                          queueStringToBLEAndChunk("Error: ID value out of range in REQUEST_IMAGE command\n");
+                      }
+                 } else {
+                      Serial.println("Error: Invalid REQUEST_IMAGE format (missing ';nodeId;eventUUID').");
+                      queueStringToBLEAndChunk("Error: Invalid REQUEST_IMAGE format (missing ';nodeId;eventUUID')\n");
+                 }
+            } // End REQUEST_IMAGE handling
+             else {
                  Serial.println("Unknown BLE command received.");
                  // Send an error message back via BLE using the chunking helper
                  queueStringToBLEAndChunk("Error: Unknown command\n");

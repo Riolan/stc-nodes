@@ -35,6 +35,7 @@ struct ImageReassemblyData {
     unsigned long lastChunkTime = 0;  // millis() timestamp of the last received chunk
     uint32_t imageIdentifier = 0;     // Store the image ID
     uint8_t sourceNodeID = 0;       // Store the node that sent the image
+    uint32_t eventUUID = 0;
 };
 
 // Map: Source NodeID -> ImageIdentifier -> ReassemblyData
@@ -50,7 +51,7 @@ volatile bool lora_request_pending = false;
 volatile uint8_t lora_req_targetNodeID = 0;
 volatile uint8_t lora_req_type = 0;
 volatile uint8_t lora_req_subtype = 0;
-#define LORA_REQ_PAYLOAD_MAX_SIZE MAX_PAYLOAD_SIZE // Use max LoRa payload size
+//#define LORA_REQ_PAYLOAD_MAX_SIZE  lora::MAX_PAYLOAD_SIZE // Use max LoRa payload size
 volatile uint8_t lora_req_payload[LORA_REQ_PAYLOAD_MAX_SIZE];
 volatile size_t lora_req_payload_len = 0;
 volatile bool lora_req_requireAck = false;
@@ -186,25 +187,86 @@ void loop() {
             }
             // --- Handle DATA ---
             case lora::PACKET_TYPE_DATA: {
-                Serial.print("Received DATA from Node 0x"); Serial.println(packet.nodeID, HEX);
-                lora::printPayload(packet.payload, packet.payloadSize);
-                // --- FORWARD DATA TO BLE (Example) ---
-                // You might want to format this data first
-                std::string bleMsg = "LoRaData;Node:";
-                bleMsg += std::to_string(packet.nodeID);
-                bleMsg += ";Payload:";
-                // Convert payload to hex string for BLE transmission
-                char hexBuf[3]; // 2 chars + null
-                for(int i=0; i<packet.payloadSize; ++i) {
-                    snprintf(hexBuf, sizeof(hexBuf), "%02X", packet.payload[i]);
-                    bleMsg += hexBuf;
-                }
-                bleMsg += "\n"; // Add terminator
-                bt::queueStringToBLE(bleMsg); // Queue the formatted string
-                // --- End Forward Data ---
+                // Process DATA packet based on subtype
+                switch(packet.subtype) {
+                    case lora::SUBTYPE_DETECTION: {
+                        Serial.print("Received DETECTION from Node 0x"); Serial.println(packet.nodeID, HEX);
+                        // --- Parse Payload with UUID ---
+                        // Expected: UUID(4) + Mask(1) + Conf(1) + BBox(8) + Timestamp(4) = 18 bytes
+                        const size_t EXPECTED_DETECTION_SIZE = 18;
+                        if (packet.payloadSize >= EXPECTED_DETECTION_SIZE) { // Check minimum size
+                            int offset = 0;
+                            // UUID (Network Byte Order)
+                            uint32_t eventUUID = ((uint32_t)packet.payload[offset++] << 24) |
+                                                    ((uint32_t)packet.payload[offset++] << 16) |
+                                                    ((uint32_t)packet.payload[offset++] << 8) |
+                                                    ((uint32_t)packet.payload[offset++]);
+                            // Animal Mask
+                            uint8_t animalMask = packet.payload[offset++];
+                            // Confidence
+                            uint8_t confidence = packet.payload[offset++];
+                            // BBox (Placeholder parsing - adjust based on actual needs)
+                            uint16_t bbox_x = ((uint16_t)packet.payload[offset++] << 8) | packet.payload[offset++];
+                            uint16_t bbox_y = ((uint16_t)packet.payload[offset++] << 8) | packet.payload[offset++];
+                            uint16_t bbox_w = ((uint16_t)packet.payload[offset++] << 8) | packet.payload[offset++];
+                            uint16_t bbox_h = ((uint16_t)packet.payload[offset++] << 8) | packet.payload[offset++];
+                                // Timestamp (Network Byte Order)
+                            uint32_t timestamp = ((uint32_t)packet.payload[offset++] << 24) |
+                                                    ((uint32_t)packet.payload[offset++] << 16) |
+                                                    ((uint32_t)packet.payload[offset++] << 8) |
+                                                    ((uint32_t)packet.payload[offset++]);
 
-                if (packet.flags & 0x02) { sendPacketAck(packet.nodeID, packet.seqNum); }
-                break;
+                            Serial.print("  Event UUID: 0x"); Serial.print(eventUUID, HEX);
+                            Serial.print(", Mask: 0x"); Serial.print(animalMask, HEX);
+                            Serial.print(", Conf: "); Serial.println(confidence);
+
+                            // --- Store/Update Node Status with latest UUID (Optional) ---
+                            int statusIndex = findNodeIndexByNodeID(packet.nodeID);
+                            // if (statusIndex != -1) {
+                            //     nodeStatus[statusIndex].latestEventUUID = eventUUID;
+                            // }
+
+                            // --- Forward Alert to BLE ---
+                            // Include UUID in the message to the app
+                            std::string bleMsg = "LoRaDetect;Node:";
+                            bleMsg += std::to_string(packet.nodeID);
+                            bleMsg += ";EventUUID:";
+                            bleMsg += std::to_string(eventUUID); // Send UUID as decimal string
+                            // Add other relevant info (mask, confidence, timestamp)
+                            bleMsg += ";Mask:";
+                            bleMsg += std::to_string(animalMask);
+                            bleMsg += ";Conf:";
+                            bleMsg += std::to_string(confidence);
+                            bleMsg += ";Time:";
+                            bleMsg += std::to_string(timestamp);
+                            // Add BBox if needed by app alert
+                            bleMsg += ";BBox:";
+                            bleMsg += std::to_string(bbox_x)+","+std::to_string(bbox_y)+","+std::to_string(bbox_w)+","+std::to_string(bbox_h);
+                            bleMsg += "\n"; // Terminator
+                            bt::queueStringToBLEAndChunk(bleMsg); // Queue for BLE send
+
+                        } else {
+                                Serial.print("WARN: Received DETECTION packet with invalid size: "); Serial.println(packet.payloadSize);
+                        }
+
+                        // Send ACK if requested
+                        if (packet.flags & 0x02) { sendPacketAck(packet.nodeID, packet.seqNum); }
+                        break; // Break from SUBTYPE_DETECTION
+                    }
+
+                    case lora::SUBTYPE_BATTERY_STATUS: {
+                        // ... (Battery status handling as before) ...
+                        if (packet.payloadSize == 1) { /* ... update nodeStatus[idx].batteryPercent ... */ }
+                        if (packet.flags & 0x02) { sendPacketAck(packet.nodeID, packet.seqNum); } // ACK if requested
+                        break;
+                    }
+                    // ... (Handle other DATA subtypes) ...
+                    default:
+                        Serial.print("Received unknown DATA Subtype 0x"); /* ... */
+                        if (packet.flags & 0x02) { sendPacketAck(packet.nodeID, packet.seqNum); } // ACK if requested
+                        break;
+                } // End switch(packet.subtype)
+                break; // Break from PACKET_TYPE_DATA
             }
              // --- Handle HEARTBEAT ---
             case lora::PACKET_TYPE_HEARTBEAT: {
@@ -225,81 +287,70 @@ void loop() {
             // --- Handle Default ---
             case lora::PACKET_TYPE_IMAGE_CHUNK: {
                 // 1. Send ACK back immediately for this chunk
-                if (packet.flags & 0x02) { // Check if ACK was requested (it should be)
-                    sendPacketAck(packet.nodeID, packet.seqNum);
-                } else {
-                    Serial.println("WARN: Received IMAGE_CHUNK without REQ_ACK flag set!");
-                }
+                if (packet.flags & 0x02) { sendPacketAck(packet.nodeID, packet.seqNum); }
+                else { Serial.println("WARN: Received IMAGE_CHUNK without REQ_ACK flag set!"); }
 
-                // 2. Validate payload size (minimum overhead is 8 bytes)
-                const size_t CHUNK_METADATA_OVERHEAD = 8;
-                if (packet.payloadSize < CHUNK_METADATA_OVERHEAD) {
-                    Serial.print("ERROR: Received IMAGE_CHUNK with invalid payload size: ");
-                    Serial.println(packet.payloadSize);
-                    break; // Ignore invalid chunk
-                }
+                // 2. Validate payload size
+                const size_t CHUNK_METADATA_OVERHEAD = 8; // UUID(4)+Chunk#(2)+TotalChunks(2)
+                if (packet.payloadSize < CHUNK_METADATA_OVERHEAD) { /* ... error ... */ break; }
 
-                // 3. Parse Metadata (Network Byte Order / Big Endian assumed)
-                uint32_t imgId = ((uint32_t)packet.payload[0] << 24) |
-                                 ((uint32_t)packet.payload[1] << 16) |
-                                 ((uint32_t)packet.payload[2] << 8) |
-                                 ((uint32_t)packet.payload[3]);
+                // 3. Parse Metadata (including UUID)
+                // Reconstructing 32-bit UUID from bytes 0, 1, 2, 3
+                uint32_t eventUUID = ((uint32_t)packet.payload[0] << 24) |
+                    ((uint32_t)packet.payload[1] << 16) |
+                    ((uint32_t)packet.payload[2] << 8)  |
+                    ((uint32_t)packet.payload[3]);
+
+                // Reconstructing 16-bit Chunk Number from bytes 4, 5
                 uint16_t chunkNum = ((uint16_t)packet.payload[4] << 8) |
-                                    ((uint16_t)packet.payload[5]);
+                  ((uint16_t)packet.payload[5]);
+
+                // Reconstructing 16-bit Total Chunks from bytes 6, 7
                 uint16_t totalNumChunks = ((uint16_t)packet.payload[6] << 8) |
-                                          ((uint16_t)packet.payload[7]);
+                    ((uint16_t)packet.payload[7]);
                 size_t chunkDataSize = packet.payloadSize - CHUNK_METADATA_OVERHEAD;
 
                 Serial.print("Received IMAGE_CHUNK from Node 0x"); Serial.print(packet.nodeID, HEX);
-                Serial.print(" for ImgID "); Serial.print(imgId);
-                Serial.print(", Chunk "); Serial.print(chunkNum);
-                Serial.print("/"); Serial.print(totalNumChunks);
-                Serial.print(" (Size: "); Serial.print(chunkDataSize); Serial.println(" bytes)");
+                Serial.print(" for EventUUID 0x"); Serial.print(eventUUID, HEX); // Log UUID
+                Serial.print(", Chunk "); Serial.print(chunkNum); /* ... */
 
-                // 4. Find or Create Reassembly Entry (by value)
-                auto& reassemblyDataRef = imageReassemblyBuffer[packet.nodeID][imgId];
-                // ... (Initialize if new: totalChunks, imageIdentifier, sourceNodeID) ...
+                // 4. Find or Create Reassembly Entry using EventUUID as key
+                auto& nodeBuffer = imageReassemblyBuffer[packet.nodeID];
+                auto& reassemblyDataRef = nodeBuffer[eventUUID]; // Use eventUUID
+
+                // Initialize if new
                 if (reassemblyDataRef.totalChunks == 0 && reassemblyDataRef.lastChunkTime == 0) {
-                     /* ... Initialize ... */
-                     reassemblyDataRef.totalChunks = totalNumChunks;
-                     reassemblyDataRef.imageIdentifier = imgId;
-                     reassemblyDataRef.sourceNodeID = packet.nodeID;
-                     reassemblyDataRef.receivedChars = 0; // Initialize char count
-                     reassemblyDataRef.complete = false;
-                     reassemblyDataRef.chunks.clear();
+                    Serial.println("  Creating new reassembly buffer entry.");
+                    reassemblyDataRef.totalChunks = totalNumChunks;
+                    reassemblyDataRef.eventUUID = eventUUID; // Store UUID
+                    reassemblyDataRef.sourceNodeID = packet.nodeID;
+                    reassemblyDataRef.receivedChars = 0;
+                    reassemblyDataRef.complete = false;
+                    reassemblyDataRef.chunks.clear();
                 }
                 // ... (Check totalChunks consistency) ...
-
 
                 // 5. Store the Chunk Data (as string)
                 if (reassemblyDataRef.chunks.find(chunkNum) == reassemblyDataRef.chunks.end()) {
                     ImageChunk newChunk;
                     const uint8_t* chunkDataStart = packet.payload + CHUNK_METADATA_OVERHEAD;
-                    // *** Convert received bytes directly to string ***
                     newChunk.data.assign((const char*)chunkDataStart, chunkDataSize);
-                    // ***------------------------------------------***
-                    reassemblyDataRef.chunks[chunkNum] = std::move(newChunk); // Store chunk string
-                    reassemblyDataRef.receivedChars += chunkDataSize; // Update total chars received
-                    Serial.print("  Stored chunk string #"); Serial.println(chunkNum);
-                } else {
-                    Serial.print("  Received duplicate chunk #"); Serial.println(chunkNum);
-                }
+                    reassemblyDataRef.chunks[chunkNum] = std::move(newChunk);
+                    reassemblyDataRef.receivedChars += chunkDataSize;
+                    // Serial.print("  Stored chunk string #"); Serial.println(chunkNum); // Verbose
+                } // else { Serial.print("  Received duplicate chunk #"); Serial.println(chunkNum); } // Verbose
 
                 // 6. Update Timestamp
                 reassemblyDataRef.lastChunkTime = now;
 
                 // 7. Check for Completion
                 if (reassemblyDataRef.chunks.size() == reassemblyDataRef.totalChunks && reassemblyDataRef.totalChunks > 0) {
-                    Serial.print("All Base64 chunks received for ImgID "); /* ... */
-                    reassemblyDataRef.complete = true;
-                } else if (reassemblyDataRef.totalChunks > 0) {
-                     Serial.print("  Received "); /* ... */ Serial.println(" chunks.");
-                }
+                    Serial.print("All Base64 chunks received for EventUUID 0x"); Serial.println(eventUUID, HEX);
+                    reassemblyDataRef.complete = true; // Mark for processing later
+                } // else { /* ... log progress ... */ } // Verbose
 
                 break; // Break from IMAGE_CHUNK case
             } // End case IMAGE_CHUNK
-
-
             default:
                 Serial.print("Received unknown packet type 0x"); Serial.print(packet.type, HEX);
                 Serial.print(" from Node 0x"); Serial.println(packet.nodeID, HEX);
@@ -314,68 +365,54 @@ void loop() {
             uint8_t nodeID = nodeIt->first;
             auto& imageMap = nodeIt->second;
             for (auto imgIt = imageMap.begin(); imgIt != imageMap.end(); /* ... */) {
-                uint32_t imgID = imgIt->first;
+                uint32_t eventUUID = imgIt->first; // Key is now UUID
                 ImageReassemblyData& reassemblyDataRef = imgIt->second;
 
                 if (reassemblyDataRef.complete) {
-                    Serial.print("Processing completed Base64 image: Node=0x"); /* ... */
+                    Serial.print("Processing completed Base64 image: Node=0x"); Serial.print(nodeID, HEX);
+                    Serial.print(", EventUUID=0x"); Serial.println(eventUUID, HEX);
 
-                    // --- 1. Reconstruct the full Base64 string ---
+                    // 1. Reconstruct the full Base64 string
                     std::string fullImageDataString = "";
-                    // Estimate size to reserve memory (optional optimization)
-                    // fullImageDataString.reserve(reassemblyDataRef.receivedChars + 10); // Estimate
                     bool reconstructionOk = true;
                     for (uint16_t i = 0; i < reassemblyDataRef.totalChunks; ++i) {
                         if (reassemblyDataRef.chunks.count(i)) {
-                            // Append the string data from the chunk
                             fullImageDataString += reassemblyDataRef.chunks[i].data;
-                        } else {
-                            Serial.print("ERROR: Missing chunk string #"); /* ... */
-                            reconstructionOk = false;
-                            break;
-                        }
+                        } else { /* ... error handling ... */ reconstructionOk = false; break; }
                     }
-                    // --- End Reconstruction ---
 
                     if (reconstructionOk) {
                         Serial.print("  Base64 string reconstructed. Total size: "); Serial.println(fullImageDataString.length());
 
-                        // --- 2. SKIP Base64 Encoding (Data is already Base64) ---
-                        // std::string base64String = base64_encode(...); // NO LONGER NEEDED
+                        // 2. SKIP Base64 Encoding
 
-                        // --- 3. Format message for BLE ---
+                        // 3. Format message for BLE including EventUUID
                         std::string bleMsg = "LoRaImage;Node:";
                         bleMsg += std::to_string(nodeID);
-                        bleMsg += ";ImgID:";
-                        bleMsg += std::to_string(imgID);
+                        bleMsg += ";EventUUID:"; // Use EventUUID instead of ImgID
+                        bleMsg += std::to_string(eventUUID);
                         bleMsg += ";Format:jpeg;Encoding:base64;Data:";
-                        // Use the directly reassembled Base64 string
                         bleMsg += fullImageDataString;
                         bleMsg += "\n"; // Terminator
 
-                        // --- 4. Queue for BLE transmission ---
+                        // 4. Queue for BLE transmission
                         Serial.println("  Queueing Base64 image data for BLE.");
-                        bt::queueStringToBLEAndChunk(bleMsg); // Use chunking queue
+                        bt::queueStringToBLEAndChunk(bleMsg);
 
-                    } else {
-                         Serial.println("  Base64 string reconstruction failed.");
-                    }
+                    } else { /* ... handle reconstruction failure ... */ }
 
-                    // --- 5. Cleanup ---
-                    imgIt = imageMap.erase(imgIt); // Remove completed entry
+                    // 5. Cleanup
+                    imgIt = imageMap.erase(imgIt);
 
                 } else if (now - reassemblyDataRef.lastChunkTime > IMAGE_REASSEMBLY_TIMEOUT) {
                     // --- Handle Timeout ---
-                    Serial.print("Timeout reassembling Base64 image: Node=0x"); /* ... */
-                    imgIt = imageMap.erase(imgIt); // Remove timed-out entry
-                } else {
-                    // Incomplete but not timed out
-                    ++imgIt;
-                }
+                    Serial.print("Timeout reassembling Base64 image: Node=0x"); Serial.print(nodeID, HEX);
+                    Serial.print(", EventUUID=0x"); Serial.println(eventUUID, HEX);
+                    imgIt = imageMap.erase(imgIt);
+                } else { ++imgIt; }
             } // End loop through images
-
-            if (imageMap.empty()) { nodeIt = imageReassemblyBuffer.erase(nodeIt); }
-            else { ++nodeIt; }
+            // ... (Cleanup outer map entry if empty) ...
+             if (imageMap.empty()) { nodeIt = imageReassemblyBuffer.erase(nodeIt); } else { ++nodeIt; }
         } // End loop through nodes
     } // End periodic image processing check
 

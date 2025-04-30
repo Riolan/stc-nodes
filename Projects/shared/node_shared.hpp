@@ -55,7 +55,7 @@ extern RH_RF95 rf95;  // Declaration of the single radio object
 // --- Constants ---
 #define ACK_TIMEOUT 5000       // Increased ACK timeout (adjust as needed)
 #define SEND_TIMEOUT_MS 2000   // Timeout waiting for TX Done signal from radio
-#define MAX_PAYLOAD_SIZE 200   // Max application payload size
+constexpr uint8_t MAX_PAYLOAD_SIZE =200 ;  // Max application payload size
 #define HEADER_SIZE 6          // Size of your header (type, subtype, seqNum, flags, nodeID, len)
 #define MAX_BUFFERED_PACKETS 10// Max packets SendManager can track for ACKs
 #define MAX_RESEND_ATTEMPTS 3  // Max times to resend a packet if ACK not received
@@ -95,8 +95,8 @@ extern volatile uint8_t lora_req_targetNodeID;
 extern volatile uint8_t lora_req_type;
 extern volatile uint8_t lora_req_subtype;
 // Need the size definition here to declare the array extern
-#define LORA_REQ_PAYLOAD_MAX_SIZE MAX_PAYLOAD_SIZE
-extern volatile uint8_t lora_req_payload[LORA_REQ_PAYLOAD_MAX_SIZE];
+constexpr uint8_t  LORA_REQ_PAYLOAD_MAX_SIZE =lora::MAX_PAYLOAD_SIZE; // Use max LoRa payload size
+extern volatile uint8_t lora_req_payload[lora::MAX_PAYLOAD_SIZE];
 extern volatile size_t lora_req_payload_len;
 extern volatile bool lora_req_requireAck;
 

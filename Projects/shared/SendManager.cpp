@@ -263,13 +263,13 @@ void SendManager::update() {
         // Check if the radio hardware has signalled completion (returned to IDLE mode)
         int currentMode = rf95.mode();
 
-        Serial.print("DEBUG: Waiting TX Done. Current rf95.mode() = ");
+       /* Serial.print("DEBUG: Waiting TX Done. Current rf95.mode() = ");
         Serial.print(currentMode);
         Serial.print(" (RHModeIdle="); Serial.print(2);
         Serial.print(", RH_RF95_MODE_SLEEP="); Serial.print(RH_RF95_MODE_SLEEP);
         Serial.print(", RH_RF95_MODE_TX="); Serial.println(RH_RF95_MODE_TX); // Add TX mode value for comparison
         Serial.print("  millis() since send start: "); Serial.println(millis() - sendStartTime);
-
+*/
                 
         
         if (rf95.mode() == 2) { // TX Done successfully!
