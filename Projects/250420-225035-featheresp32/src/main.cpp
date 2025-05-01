@@ -11,6 +11,10 @@
 // --- Function Prototype ---
 int estimateBatteryPercentage(float voltage);
 
+#include <map>
+
+std::map<uint32_t, String> uuid_image_map;
+String currentImageDataString = ""; 
 
 
 /// --- Battery Information ---
@@ -65,7 +69,7 @@ unsigned long lastHeartbeat = 0; // Timestamp for last heartbeat send
 unsigned long lastMotherHeartbeat = 0;
 
 // Timeout in milliseconds for Mother Node heartbeat
-#define MOTHER_HEARTBEAT_TIMEOUT 30000 // e.g., 30 seconds (adjust as needed)
+#define MOTHER_HEARTBEAT_TIMEOUT 90000 // e.g., 30 seconds (adjust as needed)
 // Assume Mother Node ID is 0x00
 constexpr uint8_t MOTHER_NODE_ID  = 0x00;
 
@@ -98,7 +102,7 @@ uint32_t generateEventUUID() {
 
 
 // Function called when AI detects something
-void onAnimalDetected(uint8_t detectedAnimalMask, uint8_t confidence, uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
+void onAnimalDetected(uint8_t detectedAnimalMask, uint8_t confidence, uint16_t x, uint16_t y, uint16_t w, uint16_t h, String image) {
     if (!joined || imageUploadState != ImageUploadState::IDLE) {
         Serial.println("Not joined or busy uploading, skipping detection alert send.");
         return; // Don't send if not joined or busy
@@ -106,6 +110,11 @@ void onAnimalDetected(uint8_t detectedAnimalMask, uint8_t confidence, uint16_t x
 
     // 1. Generate UUID for this event
     uint32_t eventUUID = generateEventUUID();
+    uuid_image_map[eventUUID] = image;
+
+    Serial.print("[HERE] Stored image data for UUID: 0x"); Serial.print(eventUUID, HEX);
+    Serial.print("[HERE] (Size: "); Serial.print(image.length()); Serial.println(" chars)");
+
 
     // 2. TODO: Capture and Save Image to SD Card using eventUUID in filename
     // bool imageSaved = saveImageToSD(eventUUID, /* camera data */);
@@ -161,7 +170,7 @@ void onAnimalDetected(uint8_t detectedAnimalMask, uint8_t confidence, uint16_t x
     // 4. Send Alert Packet
     Serial.println("Sending Detection Alert packet...");
     bool initiated = lora::SendManager::getInstance().send(
-        MOTHER_NODE_ID,
+        myNodeID, // WAS MOTHER NODE BEFORE
         lora::PACKET_TYPE_DATA,
         lora::SUBTYPE_DETECTION,
         payload,
@@ -180,14 +189,48 @@ void onAnimalDetected(uint8_t detectedAnimalMask, uint8_t confidence, uint16_t x
 void checkAIDetection() {
      // Simulate a detection periodically for testing
      static unsigned long lastFakeDetection = 0;
-     if (millis() - lastFakeDetection >110000) { // Every 25 seconds
-         lastFakeDetection = millis();
+     //if (millis() - lastFakeDetection >110000) { // Every 25 seconds
+     if (!AI.invoke(1, false, true)) {
+
          if (joined && imageUploadState == ImageUploadState::IDLE) {
-            Serial.println("Simulating AI Detection...");
+            //Serial.println("Attempting AI Detection...");
               // Simulate: Squirrel detected with 90% confidence
-              onAnimalDetected(lora::ANIMAL_MASK_SQUIRREL, 90, 10, 20, 50, 50);
+            //  if (millis() - lastFakeDetection >11000) {
+            //    Serial.println("Early return from AI.");
+            //    return ;
+           // }
+              for (int i = 0; i < AI.boxes().size(); i++) {
+     
+                Serial.print("Box[");
+                Serial.print(i);
+                Serial.print("] target=");
+                Serial.print(AI.boxes()[i].target);
+                Serial.print(", score=");
+                Serial.print(AI.boxes()[i].score);
+                Serial.print(", x=");
+                Serial.print(AI.boxes()[i].x);
+                Serial.print(", y=");
+                Serial.print(AI.boxes()[i].y);
+                Serial.print(", w=");
+                Serial.print(AI.boxes()[i].w);
+                Serial.print(", h=");
+                Serial.println(AI.boxes()[i].h);
+            }
+            if (AI.boxes().size() >= 1) {
+                if ( AI.boxes()[0].score > 70) {
+                    //lastFakeDetection = millis();
+
+                 onAnimalDetected(lora::ANIMAL_MASK_SQUIRREL, AI.boxes()[0].score, AI.boxes()[0].x,  AI.boxes()[0].y,  AI.boxes()[0].w,  AI.boxes()[0].h, AI.last_image());
+                }
+            }
+           // Serial.println("Sending AI Detection data!");
+             // 
          }
-     }
+    } else {
+
+        Serial.println("> Invoke failed.");
+    }
+     //}
 }
 
 
@@ -198,14 +241,14 @@ void checkAIDetection() {
 
 
 void sendNextImageChunk();
-
+/*
 void sendNextImageChunk() {
     if (imageUploadState != ImageUploadState::SENDING_CHUNK || !lora::SendManager::getInstance().isIdle()) { return; }
-    if (imageBytesSent >= totalImageSize) { /* ... already complete ... */ return; }
+    if (imageBytesSent >= totalImageSize) {  return; }
 
     const size_t CHUNK_METADATA_OVERHEAD = 8;
     size_t payloadCapacity = lora::MAX_PAYLOAD_SIZE - CHUNK_METADATA_OVERHEAD;
-    if (payloadCapacity <= 0) { /* Error */ return; }
+    if (payloadCapacity <= 0) {  return; }
     size_t remainingBytes = totalImageSize - imageBytesSent;
     size_t chunkSize = std::min(remainingBytes, payloadCapacity);
 
@@ -225,13 +268,19 @@ void sendNextImageChunk() {
     chunkPayload[7] = totalChunks & 0xFF;
     // --- Fill Chunk Data ---
     // TODO: If using SD card File object, use file.read(buffer, size) here
-    memcpy(&chunkPayload[CHUNK_METADATA_OVERHEAD], imageDataSourcePtr + imageBytesSent, chunkSize);
+    //memcpy(&chunkPayload[CHUNK_METADATA_OVERHEAD], imageDataSourcePtr + imageBytesSent, chunkSize);
 
-    Serial.print("Sending IMAGE_CHUNK #"); /* ... log chunk info ... */
+
+     // --- Fill Chunk Data ---
+    memcpy(&chunkPayload[CHUNK_METADATA_OVERHEAD],
+        currentImageDataString.c_str() + imageBytesSent, // Pointer to start of chunk in String buffer
+        chunkSize);
+
+    Serial.print("Sending IMAGE_CHUNK #"); 
 
     lastSentChunkSeqNum = lora::SendManager::getInstance().getNextSeqNum();
     bool initiated = lora::SendManager::getInstance().send(
-        imageUploadTargetNodeID,
+        myNodeID, // was imageuploadnodeid
         lora::PACKET_TYPE_IMAGE_CHUNK,
         0,
         chunkPayload,
@@ -248,10 +297,11 @@ void sendNextImageChunk() {
          Serial.println("  Image chunk send failed to initiate (radio busy?). Will retry.");
     }
 }
-
+*/
 
 void startImageUpload(uint32_t requestedUUID, uint8_t targetNodeId) {
-    if (imageUploadState != ImageUploadState::IDLE) { /* ... return if busy ... */ }
+    if (imageUploadState != ImageUploadState::IDLE) { 
+        /* ... return if busy ... */ }
 
     Serial.print("Image upload requested for UUID: 0x"); Serial.print(requestedUUID, HEX);
     Serial.print(" to Node: 0x"); Serial.println(targetNodeId, HEX);
@@ -268,19 +318,37 @@ void startImageUpload(uint32_t requestedUUID, uint8_t targetNodeId) {
     //    imageUploadState = ImageUploadState::IDLE;
     //    return;
 
-    // --- Using test image for now ---
-    imageDataSourcePtr = testImageJpegBase64;
-    totalImageSize = testImageJpegBytes_len;
-    Serial.println("  (Using embedded test image data)");
-    // --- End using test image ---
+    // --- Retrieve Image Data from Map ---
+    auto it = uuid_image_map.find(requestedUUID); // Use find for safety
+    if (it == uuid_image_map.end()) {
+        Serial.print("ERROR: Image for UUID 0x"); Serial.print(requestedUUID, HEX); Serial.println(" not found in map!");
+        // TODO: Send IMAGE_UPLOAD_STATUS (Failure - Not Found) packet?
+        return;
+    }
+
+    // *** FIX: Copy data instead of using pointer ***
+    currentImageDataString = it->second; // Copy the String content
+    totalImageSize = currentImageDataString.length(); // Get length of the copied string
+    // *** End Fix ***
+    Serial.println("  (Using image data from map)");
 
 
-    if (totalImageSize == 0 || imageDataSourcePtr == nullptr) { /* ... handle error ... */ return; }
+    if (totalImageSize == 0) {
+        Serial.println("ERROR: Image data in map is empty!");
+         // TODO: Send IMAGE_UPLOAD_STATUS (Failure - Empty) packet?
+        currentImageDataString = ""; // Clear buffer just in case
+        return;
+    }
+
 
     // Calculate overhead: UUID(4)+Chunk#(2)+TotalChunks(2) = 8 bytes
     const size_t CHUNK_METADATA_OVERHEAD = 8;
     size_t payloadCapacity = lora::MAX_PAYLOAD_SIZE - CHUNK_METADATA_OVERHEAD;
-    if (payloadCapacity <= 0 || payloadCapacity > lora::MAX_PAYLOAD_SIZE) { /* ... handle error ... */ return; }
+    if (payloadCapacity <= 0 || payloadCapacity > lora::MAX_PAYLOAD_SIZE) { 
+        Serial.println("ERROR PAYLOAD CAPACITY ");
+        currentImageDataString = ""; // Clear buffer
+
+        return; }
     totalChunks = (totalImageSize + payloadCapacity - 1) / payloadCapacity;
 
     // Initialize state variables
@@ -297,92 +365,109 @@ void startImageUpload(uint32_t requestedUUID, uint8_t targetNodeId) {
     // *** END LOGGING ***
 
 
+    Serial.print("DEBUG startImageUpload: Assigned currentImageIdentifier = 0x"); Serial.println(currentImageIdentifier, HEX);
     Serial.print("Starting image upload: Size="); Serial.print(totalImageSize);
-    Serial.print("REQUESTED UUID: "); Serial.print(currentImageIdentifier);
-
-    Serial.print(" bytes, Chunks="); Serial.println(totalChunks);
+    Serial.print(" chars, Chunks="); Serial.println(totalChunks);
     sendNextImageChunk(); // Try sending first chunk
 }
 
+// --- Helper to send the next image chunk ---
+void sendNextImageChunk() {
+    if (imageUploadState != ImageUploadState::SENDING_CHUNK || !lora::SendManager::getInstance().isIdle()) { return; }
+    // Check based on bytes ACKed (imageBytesSent) vs total size
+    if (imageBytesSent >= totalImageSize) {
+         Serial.println("INFO: All image bytes ACKed. Upload already complete.");
+         imageUploadState = ImageUploadState::IDLE;
+         currentImageDataString = ""; // Clear buffer
+         return;
+    }
 
-// --- Helper to handle receiving an ACK for an image chunk ---
+    const size_t CHUNK_METADATA_OVERHEAD = 8;
+    size_t payloadCapacity = lora::MAX_PAYLOAD_SIZE - CHUNK_METADATA_OVERHEAD;
+    if (payloadCapacity <= 0) { /* Error */ imageUploadState = ImageUploadState::IDLE; currentImageDataString = ""; return; }
+
+    // Calculate remaining bytes based on ACKed progress
+    size_t remainingBytes = totalImageSize - imageBytesSent;
+    size_t chunkSize = std::min(remainingBytes, payloadCapacity);
+
+    uint8_t chunkPayload[lora::MAX_PAYLOAD_SIZE];
+
+    // --- Fill Metadata (as before) ---
+    chunkPayload[0] = (currentImageIdentifier >> 24) & 0xFF;
+    chunkPayload[1] = (currentImageIdentifier >> 16) & 0xFF;
+    chunkPayload[2] = (currentImageIdentifier >> 8) & 0xFF;
+    chunkPayload[3] = currentImageIdentifier & 0xFF;
+    chunkPayload[4] = (currentChunkNumber >> 8) & 0xFF; // Use currentChunkNumber (index of next chunk)
+    chunkPayload[5] = currentChunkNumber & 0xFF;
+    chunkPayload[6] = (totalChunks >> 8) & 0xFF;
+    chunkPayload[7] = totalChunks & 0xFF;
+
+    // --- Fill Chunk Data ---
+    // *** FIX: Copy from the currentImageDataString buffer using imageBytesSent offset ***
+    memcpy(&chunkPayload[CHUNK_METADATA_OVERHEAD],
+           currentImageDataString.c_str() + imageBytesSent, // Pointer to start of chunk in String buffer
+           chunkSize);
+    // *** End Fix ***
+
+    Serial.print("Sending IMAGE_CHUNK #"); Serial.print(currentChunkNumber);
+    Serial.print("/"); Serial.print(totalChunks);
+    Serial.print(" (Offset: "); Serial.print(imageBytesSent);
+    Serial.print(", Size: "); Serial.print(chunkSize); Serial.println(" chars)");
+
+    lastSentChunkSeqNum = lora::SendManager::getInstance().getNextSeqNum();
+    bool initiated = lora::SendManager::getInstance().send(
+        imageUploadTargetNodeID,
+        lora::PACKET_TYPE_IMAGE_CHUNK,
+        0,
+        chunkPayload,
+        CHUNK_METADATA_OVERHEAD + chunkSize, // Total payload size
+        true // Require ACK
+    );
+
+    if (initiated) {
+        Serial.print("  Chunk send initiated with SeqNum: "); Serial.println(lastSentChunkSeqNum);
+        imageUploadState = ImageUploadState::WAITING_CHUNK_ACK; // Wait for ACK
+        chunkSendTimestamp = millis();
+        chunkResendAttempts = 0;
+        // DO NOT advance imageBytesSent or currentChunkNumber here
+    } else {
+         Serial.println("  Image chunk send failed to initiate (radio busy?). Will retry.");
+         // Stay in SENDING_CHUNK state
+    }
+}
+
+// --- handleImageChunkAck (Needs slight adjustment) ---
 void handleImageChunkAck(uint8_t ackedSeqNum) {
     if (imageUploadState == ImageUploadState::WAITING_CHUNK_ACK && ackedSeqNum == lastSentChunkSeqNum) {
         Serial.print("ACK received for Image Chunk #"); Serial.println(currentChunkNumber);
 
-        // Calculate how many bytes were in the ACKed chunk
+        // Calculate how many bytes/chars were in the successfully ACKed chunk
+        const size_t CHUNK_METADATA_OVERHEAD = 8;
+        size_t payloadCapacity = lora::MAX_PAYLOAD_SIZE - CHUNK_METADATA_OVERHEAD;
         size_t remainingBytes = totalImageSize - imageBytesSent;
-        size_t payloadCapacity = lora::MAX_PAYLOAD_SIZE - 8;
-        size_t chunkSize = std::min(remainingBytes, payloadCapacity);
+        size_t ackedChunkSize = std::min(remainingBytes, payloadCapacity);
 
         // Advance counters
-        imageBytesSent += chunkSize;
-        currentChunkNumber++;
+        imageBytesSent += ackedChunkSize; // Mark these bytes as confirmed
+        currentChunkNumber++;             // Move to the index of the next chunk
 
         // Check if upload is complete
         if (imageBytesSent >= totalImageSize) {
-            Serial.println("Image upload complete!");
+            Serial.println("Image upload complete! All chunks ACKed.");
             imageUploadState = ImageUploadState::IDLE;
+            currentImageDataString = ""; // Clear the buffer
             // TODO: Optionally send IMAGE_UPLOAD_STATUS (Success) packet
         } else {
-            // More chunks to send, go back to sending state
-            imageUploadState = ImageUploadState::SENDING_CHUNK;
-            chunkResendAttempts = 0; // Reset for next chunk
-            // Immediately try sending next chunk in the same loop iteration if possible
-            sendNextImageChunk();
+            // More chunks to send
+             Serial.print("  Advancing to next chunk. "); Serial.print(imageBytesSent); Serial.print("/"); Serial.print(totalImageSize); Serial.println(" bytes ACKed.");
+            imageUploadState = ImageUploadState::SENDING_CHUNK; // Go back to sending state
+            chunkResendAttempts = 0;
+            sendNextImageChunk(); // Immediately try sending next chunk
         }
-    } else if (imageUploadState == ImageUploadState::WAITING_CHUNK_ACK) {
-         Serial.print("WARN: Received ACK with SeqNum "); Serial.print(ackedSeqNum);
-         Serial.print(" but was waiting for "); Serial.println(lastSentChunkSeqNum);
-         // Ignore this ACK for the image upload process, might be for something else
     }
-    // If not waiting for chunk ACK, ignore the ACK in this context
+    // ... (Ignore irrelevant ACKs as before) ...
 }
 
-// --- Helper to resend the last image chunk ---
-void resendLastImageChunk() {
-     if (imageUploadState != ImageUploadState::WAITING_CHUNK_ACK) return; // Should not happen
-
-     chunkResendAttempts++;
-     Serial.print("Resending IMAGE_CHUNK #"); Serial.print(currentChunkNumber);
-     Serial.print(" (Attempt "); Serial.print(chunkResendAttempts);
-     Serial.print("/"); Serial.print(MAX_CHUNK_RESEND_ATTEMPTS); Serial.println(")...");
-
-     // Recalculate chunk size and payload (same logic as sendNextImageChunk)
-     size_t remainingBytes = totalImageSize - imageBytesSent;
-     size_t payloadCapacity = lora::MAX_PAYLOAD_SIZE - 8;
-     size_t chunkSize = std::min(remainingBytes, payloadCapacity);
-     uint8_t chunkPayload[lora::MAX_PAYLOAD_SIZE];
-     chunkPayload[0] = (currentImageIdentifier >> 24) & 0xFF; // ImgID
-     chunkPayload[1] = (currentImageIdentifier >> 16) & 0xFF;
-     chunkPayload[2] = (currentImageIdentifier >> 8) & 0xFF;
-     chunkPayload[3] = currentImageIdentifier & 0xFF;
-     chunkPayload[4] = (currentChunkNumber >> 8) & 0xFF; // Chunk #
-     chunkPayload[5] = currentChunkNumber & 0xFF;
-     chunkPayload[6] = (totalChunks >> 8) & 0xFF; // Total Chunks
-     chunkPayload[7] = totalChunks & 0xFF;
-     memcpy(&chunkPayload[8], imageDataSourcePtr + imageBytesSent, chunkSize); // Data
-
-     // Use the *same* sequence number for the resend if SendManager supports it,
-     // otherwise SendManager will assign a new one. Let's assume SendManager handles it.
-     // We still need to track the *new* seq num if SendManager assigns one.
-     // For simplicity now, let SendManager assign a new one and update our tracking.
-     lastSentChunkSeqNum = lora::SendManager::getInstance().getNextSeqNum();
-
-     bool initiated = lora::SendManager::getInstance().send(
-        imageUploadTargetNodeID, lora::PACKET_TYPE_IMAGE_CHUNK, 0,
-        chunkPayload, 8 + chunkSize, true );
-
-     if (initiated) {
-        Serial.print("  Chunk RESEND initiated with SeqNum: "); Serial.println(lastSentChunkSeqNum);
-        imageUploadState = ImageUploadState::WAITING_CHUNK_ACK; // Stay waiting
-        chunkSendTimestamp = millis(); // Reset ACK timeout timer
-     } else {
-        Serial.println("  Chunk RESEND failed to initiate (radio busy?).");
-        // Stay in WAITING_CHUNK_ACK, timeout will trigger again later.
-        // Decrement attempt count since it didn't even start? Or keep it? Let's keep it.
-     }
-}
 
 // Helper function to send a standard ACK packet
 void sendPacketAck(uint8_t targetNodeID, uint8_t seqNumToAck) {
@@ -405,6 +490,12 @@ void sendPacketAck(uint8_t targetNodeID, uint8_t seqNumToAck) {
 void setup() {
     // Generate a unique ID for this device (e.g., from MAC address)
     deviceID = (uint32_t)ESP.getEfuseMac();
+
+    if (!AI.begin()) {
+        Serial.println("AI module initialization failed.");
+        while (1);
+      }
+      Serial.println("AI module initialized.");
 
     // Radio Reset Sequence
     pinMode(RFM95_RST, OUTPUT);
@@ -502,7 +593,8 @@ void loop() {
                  // For now, just mark as joined. Mother should ideally resend JOIN_ACK if needed.
                  joined = true;
             }
-        }
+        } 
+        // TODO: ELSE IF NODEID IS NOT MOTHERNODE RETURN.
 
         // Process received packet based on type
         switch(packet.type) {
@@ -647,6 +739,7 @@ void loop() {
 
     // TODO: our AI detection logic would go here
     // For now, we simulate a detection every 25 seconds for testing purposes
+    //Serial.println("Right before CheckAIdetection.");
     checkAIDetection(); // Call AI detection check (replace with actual AI logic)
 
     // ----- 5. Handle Image Upload State Machine -----
@@ -683,7 +776,8 @@ void loop() {
             if (abs(currentSmoothedPercent - (int)lastSentBatteryPercent) >= 2 || lastSentBatteryPercent == 255) {
                  uint8_t percentPayload = (uint8_t)constrain(currentSmoothedPercent, 0, 100);
                  // Serial.print("Attempting to send Battery Status: "); Serial.print(percentPayload); Serial.println("%"); // Verbose
-                 bool initiated = lora::SendManager::getInstance().send( MOTHER_NODE_ID, lora::PACKET_TYPE_DATA, lora::SUBTYPE_BATTERY_STATUS, &percentPayload, 1, false );
+                 //  was MOTHER_NODE_ID
+                 bool initiated = lora::SendManager::getInstance().send( myNodeID, lora::PACKET_TYPE_DATA, lora::SUBTYPE_BATTERY_STATUS, &percentPayload, 1, false );
                  if (initiated) { lastBatterySend = now; lastSentBatteryPercent = percentPayload; }
                  // else { Serial.println("  Battery Status send failed to initiate..."); } // Verbose
             } else { lastBatterySend = now; } // Update timer even if not sent
@@ -693,7 +787,8 @@ void loop() {
         if (now - lastSend > 15000) {
              if (channelIsClear()) {
                  const char msg[] = "Edge node data payload!";
-                 bool initiated = lora::SendManager::getInstance().send( MOTHER_NODE_ID, lora::PACKET_TYPE_DATA, 1, (uint8_t*)msg, strlen(msg), true);
+                //  was MOTHER_NODE_ID
+                 bool initiated = lora::SendManager::getInstance().send( myNodeID, lora::PACKET_TYPE_DATA, 1, (uint8_t*)msg, strlen(msg), true);
                  if (initiated) { lastSend = now; }
                  // else { Serial.println("  Data send failed to initiate..."); } // Verbose
              }
@@ -702,7 +797,8 @@ void loop() {
 
         // --- Send Periodic Heartbeat (From Edge Node to Mother) ---
         if (now - lastHeartbeat > 30000) {
-             bool initiated = lora::SendManager::getInstance().send( MOTHER_NODE_ID, lora::PACKET_TYPE_HEARTBEAT, 0, nullptr, 0, false);
+            // was MOTHER_NODE_ID
+             bool initiated = lora::SendManager::getInstance().send( myNodeID, lora::PACKET_TYPE_HEARTBEAT, 0, nullptr, 0, false);
              if (initiated) { lastHeartbeat = now; }
              // else { Serial.println("  Heartbeat send failed to initiate..."); } // Verbose
         }
